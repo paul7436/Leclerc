@@ -1,0 +1,37 @@
+# PlatformIO build output and local IDE state
+firmware/.pio/
+firmware/.vscode/
+.pio/
+
+# Python bytecode, virtual environments, tooling caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Model weights and training output (download or train locally)
+*.pt
+*.onnx
+*.engine
+runs/
+
+# Datasets are never committed, only described in training/README.md
+training/datasets/
+training/data/
+
+# Local overrides and recordings
+host/config.local.yaml
+*.log
+*.mp4
+*.avi
+
+# Editors and OS clutter
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
