@@ -50,7 +50,7 @@ Checked in this order:
 | `OVERFLOW` | The line exceeded `kMaxLineLength` characters and was discarded. |
 | `UNKNOWN` | The command letter is not `A`, `F` or `S`. |
 | `SYNTAX` | Missing, extra or malformed arguments. |
-| `VALUE` | A number is not finite or is out of the representable range. |
+| `VALUE` | A number has more than six integer digits. |
 
 Empty lines are ignored without a reply.
 
