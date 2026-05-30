@@ -1,0 +1,6 @@
+# Runtime dependencies of the turret host.
+ultralytics>=8.3.0      # YOLO detection (pulls in PyTorch)
+opencv-python>=4.8      # camera capture, display, calibration image processing
+numpy>=1.24
+pyserial>=3.5           # USB serial link to the ESP32
+ruamel.yaml>=0.18       # config.yaml read and write, keeping comments

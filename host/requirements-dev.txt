@@ -1,0 +1,8 @@
+# Unit tests and lint. The tests need no camera, GPU, YOLO weights or ESP32.
+# Tests that use OpenCV are skipped when it is not installed; install
+# requirements.txt (or opencv-python-headless on a CI runner) to run them.
+numpy>=1.24
+pyserial>=3.5
+ruamel.yaml>=0.18
+pytest>=8.0
+ruff>=0.5
