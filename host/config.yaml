@@ -1,0 +1,78 @@
+# Leclerc turret host configuration. Every tunable of the host lives here.
+# calibration.py rewrites the values marked [calibrated] and keeps comments.
+# Hard safety limits live in the firmware (firmware/include/config.h); the
+# angle limits below only keep the host from asking for what the firmware
+# would clamp anyway.
+
+serial:
+  port: /dev/ttyACM0        # Windows: COM5, macOS: /dev/cu.usbserial-0001
+  baud: 115200
+  status_period_s: 0.2      # status poll period, also the firmware keepalive
+  status_stale_s: 0.6       # an older status counts as link down and disarmed
+
+camera:
+  source: 0                 # webcam index, or a video file path
+  width: 1280
+  height: 720
+  fps: 30
+
+detection:
+  model_path: yolo11n.pt    # pretrained COCO weights, or your custom best.pt
+  confidence: 0.45          # minimum confidence for a target
+  image_size: 640           # inference size in pixels
+  device: ""                # "" auto, "cpu", "0" first CUDA GPU, "mps" Apple GPU
+  # Class names treated as targets; an empty list means every class that is
+  # not protected. COCO has no balloon or cardboard target class: train a
+  # custom model for those (see training/README.md).
+  target_classes: [sports ball, bottle, cup]
+  selection: nearest        # nearest (to the aim point) or confidence
+
+safety:
+  # Protected classes (person, cat, dog, bird) always veto firing while
+  # visible. This COCO model looks for them on every frame, so the veto also
+  # works with a custom target model that has no person class.
+  guard_model_path: yolo11n.pt
+  guard_confidence: 0.30    # deliberately low: a doubtful detection still vetoes
+  extra_inhibit_classes: [] # more class names that veto firing while visible
+
+aim:
+  crosshair_px: [640, 360]  # [calibrated] pixel the barrel points at
+  deadband_px: 3            # pixel errors smaller than this are ignored
+  manual_step_deg: 1.0      # w a s d step in MANUAL mode
+  manual_coarse_step_deg: 5.0  # W A S D step in MANUAL mode
+  pan:
+    deg_per_px: 0.045       # [calibrated] servo degrees per image pixel
+    direction: -1           # [calibrated] sign from pixel error to rotation
+    min_deg: 20.0
+    max_deg: 160.0
+    home_deg: 90.0
+  tilt:
+    deg_per_px: 0.045       # [calibrated]
+    direction: 1            # [calibrated]
+    min_deg: 60.0
+    max_deg: 115.0
+    home_deg: 90.0
+
+pid:
+  # Input: aim error in degrees. Output: angle correction applied this frame.
+  pan:
+    kp: 0.5
+    ki: 0.1
+    kd: 0.02
+    integral_limit: 5.0     # anti-windup bound on the integral term
+    output_limit: 6.0       # largest correction per frame, degrees
+  tilt:
+    kp: 0.5
+    ki: 0.1
+    kd: 0.02
+    integral_limit: 5.0
+    output_limit: 6.0
+
+fire_policy:
+  error_threshold_px: 12    # |err_x| and |err_y| must both be below this
+  lock_frames: 5            # consecutive on-target frames required in AUTO
+  cooldown_s: 2.0           # minimum time between shot requests (0.5 s floor)
+
+ballistics:
+  target_height_m: 0.20     # real target height for distance estimation, 0 = off
+  holdover_table: []        # [calibrated] [distance_m, holdover_deg] pairs
