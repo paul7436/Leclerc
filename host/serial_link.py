@@ -1,6 +1,8 @@
 """Serial link to the turret firmware. Protocol: docs/protocol.md.
 
-SerialLink talks to the ESP32 through pyserial.
+SerialLink talks to the ESP32 through pyserial. SimulatedLink follows the same
+rules as the firmware so the host can run without hardware. Both share one
+interface and the same reply parser.
 
 Nothing here waits for a reply: commands are written immediately, and poll()
 collects whatever the firmware has sent since the previous call. The main
@@ -11,6 +13,9 @@ from __future__ import annotations
 
 import logging
 import math
+import re
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 import serial
@@ -239,3 +244,139 @@ class SerialLink(TurretLink):
         if len(self._pending) > _MAX_PENDING_BYTES:
             self._pending.clear()
         return lines
+
+
+# ---------------------------------------------------------------------------
+# Firmware simulator
+# ---------------------------------------------------------------------------
+
+_NUMBER = r"[+-]?(?:\d{1,6}(?:\.\d*)?|\.\d+)"
+_AIM_PATTERN = re.compile(rf"A\s*({_NUMBER})\s+({_NUMBER})\s*")
+
+
+class SimulatedLink(TurretLink):
+    """Stand-in for the firmware: same replies, limits, watchdog and rules.
+
+    There is no physical arming switch in a simulation, so it reports
+    DISARMED unless `hardware_armed` is set (unit tests do that), and every
+    fire request is refused while disarmed, exactly like the firmware.
+    """
+
+    def __init__(
+        self,
+        *,
+        hardware_armed: bool = False,
+        pan_limits: tuple[float, float] = (20.0, 160.0),
+        tilt_limits: tuple[float, float] = (60.0, 115.0),
+        home: tuple[float, float] = (90.0, 90.0),
+        sweep_s: float = 0.5,
+        cooldown_s: float = 1.5,
+        link_timeout_s: float = 0.5,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        super().__init__()
+        self._armed = hardware_armed
+        self._pan_limits = pan_limits
+        self._tilt_limits = tilt_limits
+        self._pan, self._tilt = home
+        self._sweep_s = sweep_s
+        self._cooldown_s = cooldown_s
+        self._link_timeout_s = link_timeout_s
+        self._clock = clock
+        self._link_ok = False
+        self._last_command_s = clock()
+        self._sweep_start_s: float | None = None
+        self._outbox: list[str] = ["READY simulated"]
+        self.shots_fired = 0
+
+    @property
+    def angles(self) -> tuple[float, float]:
+        return self._pan, self._tilt
+
+    def set_hardware_armed(self, armed: bool) -> None:
+        """Simulates flipping the arming switch."""
+        if armed != self._armed:
+            self._armed = armed
+            self._outbox.append(f"EVT ARM {int(armed)}")
+
+    def _write(self, text: str) -> None:
+        now = self._clock()
+        self._check_watchdog(now)
+        for line in text.splitlines():
+            self._handle_line(line.strip(), now)
+
+    def _read_lines(self) -> list[str]:
+        self._check_watchdog(self._clock())
+        lines, self._outbox = self._outbox, []
+        return lines
+
+    def _handle_line(self, line: str, now: float) -> None:
+        if not line:
+            return
+        if line[0] == "A":
+            self._handle_aim(line, now)
+        elif line == "S":
+            self._on_command(restores_link=True, now=now)
+            self._outbox.append(self._status_line(now))
+        elif line == "F":
+            self._on_command(restores_link=False, now=now)
+            self._outbox.append(self._fire_line(now))
+        elif line[0] in "FS":
+            self._outbox.append("ERR SYNTAX")
+        else:
+            self._outbox.append("ERR UNKNOWN")
+
+    def _handle_aim(self, line: str, now: float) -> None:
+        match = _AIM_PATTERN.fullmatch(line)
+        if match is None:
+            self._outbox.append("ERR SYNTAX")
+            return
+        self._on_command(restores_link=True, now=now)
+        self._pan = _clamp(float(match.group(1)), *self._pan_limits)
+        self._tilt = _clamp(float(match.group(2)), *self._tilt_limits)
+
+    def _on_command(self, *, restores_link: bool, now: float) -> None:
+        self._last_command_s = now
+        if restores_link and not self._link_ok:
+            self._link_ok = True
+            self._outbox.append("EVT LINK 1")
+
+    def _check_watchdog(self, now: float) -> None:
+        if self._link_ok and now - self._last_command_s >= self._link_timeout_s:
+            self._link_ok = False
+            self._outbox.append("EVT LINK 0")
+
+    def _fire_line(self, now: float) -> str:
+        if not self._armed:
+            return "FIRE DENIED DISARMED"
+        if not self._link_ok:
+            return "FIRE DENIED LINK"
+        if self._trigger_state(now) != "IDLE":
+            return "FIRE DENIED BUSY"
+        if self._cooldown_ms(now) > 0:
+            return "FIRE DENIED COOLDOWN"
+        self._sweep_start_s = now
+        self.shots_fired += 1
+        return "FIRE OK"
+
+    def _trigger_state(self, now: float) -> str:
+        if self._sweep_start_s is not None and now - self._sweep_start_s < self._sweep_s:
+            return "PULL"
+        return "IDLE"
+
+    def _cooldown_ms(self, now: float) -> int:
+        if self._sweep_start_s is None:
+            return 0
+        ready_at = self._sweep_start_s + self._sweep_s + self._cooldown_s
+        return max(0, math.ceil((ready_at - now) * 1000))
+
+    def _status_line(self, now: float) -> str:
+        return (
+            f"STATUS armed={int(self._armed)} link={int(self._link_ok)} "
+            f"pan={self._pan:.2f} tilt={self._tilt:.2f} "
+            f"trigger={self._trigger_state(now)} cooldown_ms={self._cooldown_ms(now)}"
+        )
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    return min(max(value, low), high)
