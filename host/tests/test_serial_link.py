@@ -7,9 +7,21 @@ from serial_link import (
     FirmwareEvent,
     FirmwareStatus,
     SerialLink,
+    SimulatedLink,
     format_aim,
     parse_line,
 )
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 100.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
 
 
 class FakePort:
@@ -140,3 +152,82 @@ def test_close_releases_port():
     with SerialLink(port):
         pass
     assert not port.is_open
+
+
+# -- SimulatedLink follows the firmware rules ---------------------------------
+
+
+def make_sim(**kwargs) -> tuple[SimulatedLink, FakeClock]:
+    clock = FakeClock()
+    sim = SimulatedLink(clock=clock, **kwargs)
+    sim.poll(clock.now)  # consume the READY banner
+    return sim, clock
+
+
+def fire_reply(sim: SimulatedLink, clock: FakeClock) -> FireReply:
+    sim.fire()
+    replies = [m for m in sim.poll(clock.now) if isinstance(m, FireReply)]
+    assert len(replies) == 1
+    return replies[0]
+
+
+def test_sim_refuses_fire_when_disarmed_by_default():
+    sim, clock = make_sim()
+    sim.request_status()
+    sim.poll(clock.now)
+    assert fire_reply(sim, clock) == FireReply(False, "DISARMED")
+    assert sim.shots_fired == 0
+
+
+def test_sim_link_must_be_established_by_status_or_aim():
+    sim, clock = make_sim(hardware_armed=True)
+    assert fire_reply(sim, clock) == FireReply(False, "LINK")
+    sim.request_status()
+    messages = sim.poll(clock.now)
+    assert FirmwareEvent("LINK", "1") in messages
+    assert sim.status.link_ok
+    assert fire_reply(sim, clock) == FireReply(True, "")
+    assert sim.shots_fired == 1
+
+
+def test_sim_busy_then_cooldown_then_ready():
+    sim, clock = make_sim(hardware_armed=True, sweep_s=0.5, cooldown_s=1.5)
+    sim.request_status()
+    assert fire_reply(sim, clock).accepted
+    clock.advance(0.2)
+    assert fire_reply(sim, clock) == FireReply(False, "BUSY")
+    clock.advance(0.4)
+    assert fire_reply(sim, clock) == FireReply(False, "COOLDOWN")
+    clock.advance(1.4)
+    sim.request_status()  # keepalive: F alone never restores a dropped link
+    assert fire_reply(sim, clock).accepted
+
+
+def test_sim_watchdog_drops_link_after_silence():
+    sim, clock = make_sim(hardware_armed=True, link_timeout_s=0.5)
+    sim.set_angles(90, 90)
+    sim.request_status()
+    sim.poll(clock.now)
+    clock.advance(0.6)
+    assert FirmwareEvent("LINK", "0") in sim.poll(clock.now)
+    assert not sim.status.link_ok
+    assert fire_reply(sim, clock) == FireReply(False, "LINK")
+
+
+def test_sim_clamps_angles_and_rejects_bad_commands():
+    sim, clock = make_sim(pan_limits=(20, 160), tilt_limits=(60, 115))
+    sim.set_angles(500, -40)
+    assert sim.angles == (160, 60)
+    sim._write("A90\nX\n")
+    errors = [m for m in sim.poll(clock.now) if isinstance(m, FirmwareEvent) and m.name == "ERR"]
+    assert [e.value for e in errors] == ["SYNTAX", "UNKNOWN"]
+    assert sim.angles == (160, 60)
+
+
+def test_sim_arming_switch_event_updates_status():
+    sim, clock = make_sim(hardware_armed=True)
+    sim.request_status()
+    sim.poll(clock.now)
+    sim.set_hardware_armed(False)
+    assert FirmwareEvent("ARM", "0") in sim.poll(clock.now)
+    assert not sim.status.armed
