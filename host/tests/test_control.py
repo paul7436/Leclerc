@@ -1,7 +1,33 @@
 import pytest
 
-from control import PID
-from settings import PidGains
+from control import PID, AimController
+from settings import AxisSettings, PidGains
+
+
+def make_axis(direction: int = 1, deg_per_px: float = 0.05) -> AxisSettings:
+    return AxisSettings(
+        deg_per_px=deg_per_px, direction=direction, min_deg=20.0, max_deg=160.0, home_deg=90.0
+    )
+
+
+def make_controller(pan_direction: int = -1, tilt_direction: int = 1, kp: float = 0.6):
+    return AimController(
+        crosshair_px=(640.0, 360.0),
+        pan=make_axis(pan_direction),
+        tilt=make_axis(tilt_direction),
+        pan_pid=PID(kp=kp, output_limit=6.0),
+        tilt_pid=PID(kp=kp, output_limit=6.0),
+        deadband_px=2.0,
+    )
+
+
+def observed_pixel(command_deg, target_deg, axis: AxisSettings, center_px):
+    """Camera-on-barrel model: where a target at `target_deg` appears.
+
+    `direction` is calibrated as minus the sign of the image shift caused by
+    increasing the servo angle, so the shift sign is -direction.
+    """
+    return center_px - axis.direction * (command_deg - target_deg) / axis.deg_per_px
 
 
 def test_proportional_only():
@@ -45,3 +71,60 @@ def test_from_gains():
     pid = PID.from_gains(PidGains(kp=0.4, ki=0.1, kd=0.02, integral_limit=3.0, output_limit=5.0))
     assert (pid.kp, pid.ki, pid.kd) == (0.4, 0.1, 0.02)
     assert (pid.integral_limit, pid.output_limit) == (3.0, 5.0)
+
+
+def test_controller_starts_home_and_clamps():
+    controller = make_controller()
+    assert controller.angles == (90.0, 90.0)
+    controller.set_angles(500.0, -10.0)
+    assert controller.angles == (160.0, 20.0)
+
+
+@pytest.mark.parametrize(("pan_direction", "tilt_direction"), [(1, 1), (-1, 1), (1, -1), (-1, -1)])
+def test_tracking_converges_whatever_the_servo_directions(pan_direction, tilt_direction):
+    controller = make_controller(pan_direction, tilt_direction)
+    pan_axis, tilt_axis = make_axis(pan_direction), make_axis(tilt_direction)
+    target_pan, target_tilt = 112.0, 74.0
+    for _ in range(40):
+        pan, tilt = controller.angles
+        target_px = (
+            observed_pixel(pan, target_pan, pan_axis, 640.0),
+            observed_pixel(tilt, target_tilt, tilt_axis, 360.0),
+        )
+        controller.track(target_px, controller.crosshair_px, dt_s=1 / 30)
+    pan, tilt = controller.angles
+    assert pan == pytest.approx(target_pan, abs=0.15)
+    assert tilt == pytest.approx(target_tilt, abs=0.15)
+
+
+def test_tracking_step_is_bounded_by_pid_output_limit():
+    controller = make_controller(kp=10.0)
+    pan_before, _ = controller.angles
+    controller.track((1200.0, 360.0), controller.crosshair_px, dt_s=1 / 30)
+    pan_after, _ = controller.angles
+    assert abs(pan_after - pan_before) == pytest.approx(6.0)
+
+
+def test_deadband_ignores_small_errors():
+    controller = make_controller()
+    controller.track((641.5, 358.5), controller.crosshair_px, dt_s=1 / 30)
+    assert controller.angles == (90.0, 90.0)
+
+
+def test_error_is_measured_from_the_aim_point():
+    assert AimController.error_px((700.0, 300.0), (640.0, 360.0)) == (60.0, -60.0)
+
+
+def test_nudge_view_follows_calibrated_directions():
+    controller = make_controller(pan_direction=-1, tilt_direction=1)
+    controller.nudge_view(right=1, down=0, step_deg=2.0)
+    assert controller.angles == (88.0, 90.0)
+    controller.nudge_view(right=0, down=-1, step_deg=2.0)  # aim up
+    assert controller.angles == (88.0, 88.0)
+
+
+def test_home_restores_home_angles():
+    controller = make_controller()
+    controller.set_angles(30.0, 100.0)
+    controller.home()
+    assert controller.angles == (90.0, 90.0)
