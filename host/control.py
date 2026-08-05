@@ -10,8 +10,9 @@ seen off the aim point therefore calls for a relative correction:
 from __future__ import annotations
 
 import math
+from bisect import bisect_left
 
-from settings import AimSettings, AxisSettings, PidGains, PidSettings
+from settings import AimSettings, AxisSettings, BallisticsSettings, PidGains, PidSettings
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -158,3 +159,90 @@ class AimController:
             error_px = 0.0
         error_deg = error_px * axis.deg_per_px
         return axis.direction * pid.update(error_deg, dt_s)
+
+
+# ---------------------------------------------------------------------------
+# Ballistics: dart drop compensation
+# ---------------------------------------------------------------------------
+
+
+class HoldoverTable:
+    """Extra tilt, in degrees, needed at a given distance to offset dart drop.
+
+    Linear interpolation between calibrated points, held flat beyond the
+    first and last points. An empty table means no holdover.
+    """
+
+    def __init__(self, rows: list[tuple[float, float]]) -> None:
+        ordered = sorted(rows)
+        self._distances = [distance for distance, _ in ordered]
+        self._holdovers = [holdover for _, holdover in ordered]
+
+    def __len__(self) -> int:
+        return len(self._distances)
+
+    def holdover_deg(self, distance_m: float) -> float:
+        if not self._distances:
+            return 0.0
+        if distance_m <= self._distances[0]:
+            return self._holdovers[0]
+        if distance_m >= self._distances[-1]:
+            return self._holdovers[-1]
+        upper = bisect_left(self._distances, distance_m)
+        d0, d1 = self._distances[upper - 1], self._distances[upper]
+        h0, h1 = self._holdovers[upper - 1], self._holdovers[upper]
+        return h0 + (h1 - h0) * (distance_m - d0) / (d1 - d0)
+
+
+def focal_length_px(deg_per_px: float) -> float:
+    """Focal length in pixels implied by the calibrated angle of one pixel."""
+    return 1.0 / math.tan(math.radians(deg_per_px))
+
+
+def estimate_distance_m(box_height_px: float, target_height_m: float, focal_px: float) -> float:
+    """Pinhole camera estimate of the distance to a target of known height."""
+    if box_height_px <= 0:
+        raise ValueError("box height must be positive")
+    return focal_px * target_height_m / box_height_px
+
+
+class Ballistics:
+    """Moves the aim point to compensate dart drop at the estimated distance.
+
+    The camera tilts with the barrel. To make the barrel point `holdover`
+    degrees above the target, the target must sit that many degrees below
+    the crosshair in the image, whatever the tilt servo direction.
+    """
+
+    def __init__(self, table: HoldoverTable, target_height_m: float, tilt_deg_per_px: float):
+        self._table = table
+        self._target_height_m = target_height_m
+        self._tilt_deg_per_px = tilt_deg_per_px
+        self._focal_px = focal_length_px(tilt_deg_per_px)
+
+    @classmethod
+    def from_settings(cls, ballistics: BallisticsSettings, aim: AimSettings) -> Ballistics:
+        return cls(
+            HoldoverTable(ballistics.holdover_table),
+            ballistics.target_height_m,
+            aim.tilt.deg_per_px,
+        )
+
+    @property
+    def enabled(self) -> bool:
+        return self._target_height_m > 0 and len(self._table) > 0
+
+    def estimate_distance_m(self, box_height_px: float) -> float | None:
+        if self._target_height_m <= 0 or box_height_px <= 0:
+            return None
+        return estimate_distance_m(box_height_px, self._target_height_m, self._focal_px)
+
+    def aim_point(
+        self, crosshair_px: tuple[float, float], box_height_px: float
+    ) -> tuple[float, float]:
+        """Where the target must sit in the image for the dart to hit it."""
+        distance_m = self.estimate_distance_m(box_height_px) if self.enabled else None
+        if distance_m is None:
+            return crosshair_px
+        holdover_px = self._table.holdover_deg(distance_m) / self._tilt_deg_per_px
+        return crosshair_px[0], crosshair_px[1] + holdover_px
