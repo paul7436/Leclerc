@@ -1,6 +1,15 @@
+import math
+
 import pytest
 
-from control import PID, AimController
+from control import (
+    PID,
+    AimController,
+    Ballistics,
+    HoldoverTable,
+    estimate_distance_m,
+    focal_length_px,
+)
 from settings import AxisSettings, PidGains
 
 
@@ -128,3 +137,41 @@ def test_home_restores_home_angles():
     controller.set_angles(30.0, 100.0)
     controller.home()
     assert controller.angles == (90.0, 90.0)
+
+
+def test_holdover_table_interpolates_and_holds_ends():
+    table = HoldoverTable([(3.0, 2.0), (1.0, 0.5)])
+    assert table.holdover_deg(0.5) == pytest.approx(0.5)
+    assert table.holdover_deg(1.0) == pytest.approx(0.5)
+    assert table.holdover_deg(2.0) == pytest.approx(1.25)
+    assert table.holdover_deg(10.0) == pytest.approx(2.0)
+
+
+def test_empty_holdover_table_is_zero():
+    assert HoldoverTable([]).holdover_deg(2.0) == 0.0
+
+
+def test_focal_length_and_distance_estimate():
+    focal = focal_length_px(0.05)
+    assert focal == pytest.approx(1 / math.tan(math.radians(0.05)))
+    # A 0.2 m target that appears 0.2 * focal / 2 pixels tall is 2 m away.
+    assert estimate_distance_m(0.2 * focal / 2.0, 0.2, focal) == pytest.approx(2.0)
+    with pytest.raises(ValueError):
+        estimate_distance_m(0.0, 0.2, focal)
+
+
+def test_ballistics_lowers_aim_point_by_holdover():
+    focal = focal_length_px(0.05)
+    ballistics = Ballistics(HoldoverTable([(1.0, 0.5), (3.0, 1.5)]), 0.2, tilt_deg_per_px=0.05)
+    box_height_at_2m = 0.2 * focal / 2.0
+    x, y = ballistics.aim_point((640.0, 360.0), box_height_at_2m)
+    assert x == 640.0
+    assert y == pytest.approx(360.0 + 1.0 / 0.05)  # 1 degree of holdover, 20 px lower
+
+
+def test_ballistics_disabled_without_table_or_target_height():
+    no_table = Ballistics(HoldoverTable([]), 0.2, tilt_deg_per_px=0.05)
+    no_height = Ballistics(HoldoverTable([(1.0, 0.5)]), 0.0, tilt_deg_per_px=0.05)
+    for ballistics in (no_table, no_height):
+        assert not ballistics.enabled
+        assert ballistics.aim_point((640.0, 360.0), 100.0) == (640.0, 360.0)
