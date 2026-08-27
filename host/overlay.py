@@ -42,9 +42,9 @@ class HudState:
 def draw_hud(frame: np.ndarray, hud: HudState) -> None:
     """Draws the full HUD in place."""
     _draw_detections(frame, hud.detections, hud.target)
-    _draw_crosshair(frame, hud.crosshair_px, GREEN)
+    draw_crosshair(frame, hud.crosshair_px, GREEN)
     if hud.aim_point_px != hud.crosshair_px:
-        _draw_point(frame, hud.aim_point_px, YELLOW)
+        draw_point(frame, hud.aim_point_px, YELLOW)
     _draw_status_panel(frame, hud)
     if hud.detections.veto:
         _draw_banner(frame, "PROTECTED CLASS IN VIEW - FIRE INHIBITED", RED)
@@ -65,10 +65,10 @@ def _draw_detections(
 def _draw_box(frame: np.ndarray, detection: Detection, color: tuple, label: str) -> None:
     x1, y1, x2, y2 = (int(round(v)) for v in detection.box)
     cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-    _draw_text(frame, label, (x1, max(16, y1 - 6)), color, scale=0.5)
+    draw_text(frame, label, (x1, max(16, y1 - 6)), color, scale=0.5)
 
 
-def _draw_crosshair(frame: np.ndarray, center: tuple[float, float], color: tuple) -> None:
+def draw_crosshair(frame: np.ndarray, center: tuple[float, float], color: tuple) -> None:
     x, y = int(round(center[0])), int(round(center[1]))
     gap, arm = 5, 18
     cv2.line(frame, (x - arm, y), (x - gap, y), color, 2)
@@ -77,7 +77,7 @@ def _draw_crosshair(frame: np.ndarray, center: tuple[float, float], color: tuple
     cv2.line(frame, (x, y + gap), (x, y + arm), color, 2)
 
 
-def _draw_point(frame: np.ndarray, point: tuple[float, float], color: tuple) -> None:
+def draw_point(frame: np.ndarray, point: tuple[float, float], color: tuple) -> None:
     cv2.circle(frame, (int(round(point[0])), int(round(point[1]))), 6, color, 2)
 
 
@@ -99,7 +99,7 @@ def _draw_status_panel(frame: np.ndarray, hud: HudState) -> None:
 
     y = 24
     for text, color in lines:
-        _draw_text(frame, text, (10, y), color)
+        draw_text(frame, text, (10, y), color)
         y += 24
 
 
@@ -112,15 +112,15 @@ def _draw_banner(frame: np.ndarray, text: str, color: tuple) -> None:
     height, width = frame.shape[:2]
     (text_width, _), _ = cv2.getTextSize(text, FONT, 0.8, 2)
     x = max(10, (width - text_width) // 2)
-    _draw_text(frame, text, (x, height - 48), color, scale=0.8, thickness=2)
+    draw_text(frame, text, (x, height - 48), color, scale=0.8, thickness=2)
 
 
 def _draw_footer(frame: np.ndarray, text: str) -> None:
     height = frame.shape[0]
-    _draw_text(frame, text, (10, height - 12), GRAY, scale=0.5)
+    draw_text(frame, text, (10, height - 12), GRAY, scale=0.5)
 
 
-def _draw_text(
+def draw_text(
     frame: np.ndarray,
     text: str,
     origin: tuple[int, int],
