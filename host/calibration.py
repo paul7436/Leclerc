@@ -1,15 +1,18 @@
 """Interactive calibration. Results are written back into config.yaml.
 
     python calibration.py crosshair   pick the pixel the barrel points at
+    python calibration.py degpx       measure servo degrees per image pixel
 
-Keep the arming switch OFF for this step: it never moves the trigger.
+Keep the arming switch OFF for these steps: they never move the trigger.
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import math
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -18,8 +21,10 @@ import numpy as np
 import serial
 
 from detection import Camera, CameraError
-from overlay import GREEN, WHITE, YELLOW, draw_crosshair, draw_text
+from main import shutdown_safely
+from overlay import GREEN, RED, WHITE, YELLOW, draw_crosshair, draw_text
 from settings import DEFAULT_CONFIG_PATH, ConfigError, Settings, load_settings, save_calibration
+from turret import Turret, open_link
 
 logger = logging.getLogger("calibration")
 
@@ -31,6 +36,16 @@ KEY_ESCAPE = 27
 DIRECTION_KEYS = {"a": (-1, 0), "d": (1, 0), "w": (0, -1), "s": (0, 1)}
 
 TextLines = list[tuple[str, tuple]]
+
+# deg/pixel measurement
+NUDGE_DEG = 4.0  # servo move used for each measurement
+SETTLE_S = 0.8  # time for the servo, the mount and the camera to settle
+MIN_SHIFT_PX = 8.0  # smaller image shifts are too imprecise
+MIN_RESPONSE = 0.08  # weaker phase correlation peaks are not trusted
+
+
+class CalibrationError(RuntimeError):
+    """A measurement could not be trusted."""
 
 
 class ClickTracker:
@@ -117,12 +132,142 @@ def calibrate_crosshair(settings: Settings, camera: Camera, config_path: Path) -
 
 
 # ---------------------------------------------------------------------------
+# Step 2: degrees per pixel
+# ---------------------------------------------------------------------------
+
+
+def measure_shift(before: np.ndarray, after: np.ndarray) -> tuple[float, float, float]:
+    """Image translation from `before` to `after` by phase correlation.
+
+    Returns (dx, dy, response): positive dx and dy mean the content moved
+    right and down. The response (0 to 1) measures how clear the peak is.
+    """
+    first = _to_gray_float(before)
+    second = _to_gray_float(after)
+    window = cv2.createHanningWindow((first.shape[1], first.shape[0]), cv2.CV_32F)
+    (dx, dy), response = cv2.phaseCorrelate(first, second, window)
+    return float(dx), float(dy), float(response)
+
+
+def _to_gray_float(image: np.ndarray) -> np.ndarray:
+    if image.ndim == 3:
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    return image.astype(np.float32)
+
+
+def axis_from_samples(px_per_deg: list[float]) -> tuple[float, int]:
+    """Turns image shifts per servo degree into (deg_per_px, direction).
+
+    The camera moves with the barrel. If a positive servo move shifts the
+    image by s pixels, a target e pixels off the aim point needs a move of
+    -e / s degrees, hence direction = -sign(s).
+    """
+    if not px_per_deg:
+        raise CalibrationError("no measurement")
+    if len({math.copysign(1.0, sample) for sample in px_per_deg}) != 1:
+        raise CalibrationError(f"inconsistent shift directions: {px_per_deg}")
+    mean = sum(px_per_deg) / len(px_per_deg)
+    return 1.0 / abs(mean), -int(math.copysign(1.0, mean))
+
+
+def settle(turret: Turret, camera: Camera, angles: tuple[float, float]) -> np.ndarray:
+    """Moves, keeps the firmware link alive while waiting, returns a fresh frame."""
+    turret.aim.set_angles(*angles)
+    turret.push_aim()
+    deadline = time.monotonic() + SETTLE_S
+    while True:
+        frame = camera.read()  # reading continuously also drains stale frames
+        turret.service(time.monotonic())
+        if time.monotonic() >= deadline:
+            return frame
+        show(frame.copy(), [("measuring, keep the scene still", YELLOW)])
+
+
+def measure_axis(turret: Turret, camera: Camera, axis: int, name: str) -> list[float]:
+    """Nudges one axis both ways and returns image pixels moved per degree."""
+    base = turret.aim.angles
+    samples = []
+    for sign in (1.0, -1.0):
+        before = settle(turret, camera, base)
+        moved = list(base)
+        moved[axis] += sign * NUDGE_DEG
+        after = settle(turret, camera, (moved[0], moved[1]))
+        delta_deg = turret.aim.angles[axis] - base[axis]  # after clamping
+        dx, dy, response = measure_shift(before, after)
+        shift_px = dx if axis == 0 else dy
+        logger.info(
+            "%s %+.1f deg: shift %.1f px, response %.2f", name, delta_deg, shift_px, response
+        )
+        if abs(delta_deg) < 0.5 * NUDGE_DEG:
+            raise CalibrationError(f"{name}: too close to a limit, move away from it first")
+        if response < MIN_RESPONSE or abs(shift_px) < MIN_SHIFT_PX:
+            raise CalibrationError(
+                f"{name}: unreliable shift ({shift_px:.1f} px, response {response:.2f}); "
+                "aim at a static, textured scene"
+            )
+        samples.append(shift_px / delta_deg)
+    settle(turret, camera, base)
+    return samples
+
+
+def wait_for_start(turret: Turret, camera: Camera, title: str) -> bool:
+    """Live view with manual aiming until Enter (True) or Esc (False)."""
+    while True:
+        frame = camera.read()
+        turret.service(time.monotonic())
+        turret.push_aim()
+        link_ok = turret.link_ok(time.monotonic())
+        link_line = ("link OK", GREEN) if link_ok else ("waiting for the firmware link", RED)
+        key = show(
+            frame,
+            [
+                (title, WHITE),
+                link_line,
+                ("w a s d aim (Shift coarse)   Enter start   Esc cancel", YELLOW),
+            ],
+        )
+        if key == KEY_ESCAPE:
+            return False
+        if key in KEY_ENTER and link_ok:
+            return True
+        moved = key_direction(key)
+        if moved is not None:
+            # Directions are not calibrated yet: keys drive the servo angles directly.
+            (right, down), coarse = moved
+            aim = turret.aim
+            step = 5.0 if coarse else 1.0
+            aim.set_angles(aim.angles[0] + right * step, aim.angles[1] + down * step)
+
+
+def calibrate_deg_per_px(settings: Settings, camera: Camera, config_path: Path) -> bool:
+    """Measures deg/pixel and direction for pan and tilt."""
+    with open_link(settings, simulate=False) as link:
+        turret = Turret.from_settings(settings, link)
+        try:
+            title = "DEG/PX: aim at a static, textured scene (arming switch OFF)"
+            if not wait_for_start(turret, camera, title):
+                return False
+            pan = axis_from_samples(measure_axis(turret, camera, 0, "pan"))
+            tilt = axis_from_samples(measure_axis(turret, camera, 1, "tilt"))
+        except CalibrationError as exc:
+            logger.error("%s", exc)
+            return False
+        finally:
+            shutdown_safely(turret)
+    save_calibration(config_path, pan=pan, tilt=tilt)
+    logger.info("pan %.5f deg/px direction %+d", *pan)
+    logger.info("tilt %.5f deg/px direction %+d", *tilt)
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Program
 # ---------------------------------------------------------------------------
 
 Step = Callable[[Settings, Camera, Path], bool]
 STEPS: dict[str, Step] = {
     "crosshair": calibrate_crosshair,
+    "degpx": calibrate_deg_per_px,
 }
 
 
