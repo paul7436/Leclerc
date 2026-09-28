@@ -4,13 +4,21 @@ cv2 = pytest.importorskip("cv2")
 np = pytest.importorskip("numpy")
 
 from calibration import (  # noqa: E402
+    MIN_DISTANCE_M,
     CalibrationError,
     ClickTracker,
+    HoldoverSession,
     axis_from_samples,
+    holdover_from_impact,
     key_direction,
     measure_shift,
     move_point,
+    remove_point,
+    upsert_point,
 )
+from serial_link import SimulatedLink  # noqa: E402
+from settings import load_settings  # noqa: E402
+from turret import Turret  # noqa: E402
 
 
 def textured_image(seed: int = 1) -> np.ndarray:
@@ -69,3 +77,60 @@ def test_axis_from_samples_gives_magnitude_and_direction():
 def test_axis_from_samples_rejects_bad_measurements(samples):
     with pytest.raises(CalibrationError):
         axis_from_samples(samples)
+
+
+def test_holdover_from_impact():
+    # The dart landed 40 px below the crosshair at 0.05 deg/px: raise 2 degrees.
+    assert holdover_from_impact(400.0, 360.0, 0.05) == pytest.approx(2.0)
+    assert holdover_from_impact(350.0, 360.0, 0.05) == pytest.approx(-0.5)
+
+
+def test_upsert_and_remove_points():
+    table = upsert_point([(3.0, 1.5)], 1.0, 0.4)
+    assert table == [(1.0, 0.4), (3.0, 1.5)]
+    assert upsert_point(table, 1.0, 0.6) == [(1.0, 0.6), (3.0, 1.5)]
+    assert remove_point(table, 3.0) == [(1.0, 0.4)]
+
+
+def make_session() -> HoldoverSession:
+    settings = load_settings()
+    turret = Turret.from_settings(settings, SimulatedLink())
+    return HoldoverSession(settings, turret)
+
+
+def test_session_distance_keys_and_undo():
+    session = make_session()
+    session.handle_key(ord("]"))
+    assert session.distance_m == pytest.approx(1.25)
+    for _ in range(10):
+        session.handle_key(ord("["))
+    assert session.distance_m == pytest.approx(MIN_DISTANCE_M)
+
+    session.record_impact((640.0, 400.0))
+    assert len(session.table) == 1
+    session.handle_key(ord("u"))
+    assert session.table == []
+
+
+def test_session_records_impact_at_current_distance():
+    session = make_session()
+    crosshair_y = session.turret.aim.crosshair_px[1]
+    deg_per_px = session.settings.aim.tilt.deg_per_px
+    session.record_impact((600.0, crosshair_y + 20.0))
+    assert session.table == [(1.0, pytest.approx(20.0 * deg_per_px))]
+
+
+def test_session_arm_toggle_fire_request_and_aim():
+    session = make_session()
+    assert not session.turret.policy.software_armed
+    session.handle_key(ord("x"))
+    assert session.turret.policy.software_armed
+    session.handle_key(ord("x"))
+    assert not session.turret.policy.software_armed
+
+    session.handle_key(ord(" "))
+    assert session.fire_requested
+
+    pan_before = session.turret.aim.angles[0]
+    session.handle_key(ord("D"))
+    assert session.turret.aim.angles[0] != pan_before
