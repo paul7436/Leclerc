@@ -2,8 +2,11 @@
 
     python calibration.py crosshair   pick the pixel the barrel points at
     python calibration.py degpx       measure servo degrees per image pixel
+    python calibration.py holdover    build the distance -> tilt holdover table
 
-Keep the arming switch OFF for these steps: they never move the trigger.
+Keep the arming switch OFF for crosshair and degpx: they never move the
+trigger. The holdover step fires test shots, and every one of them goes
+through the same fire policy and firmware checks as main.py.
 """
 
 from __future__ import annotations
@@ -20,9 +23,10 @@ import cv2
 import numpy as np
 import serial
 
-from detection import Camera, CameraError
+from control import Ballistics
+from detection import Camera, CameraError, YoloDetector
 from main import shutdown_safely
-from overlay import GREEN, RED, WHITE, YELLOW, draw_crosshair, draw_text
+from overlay import GREEN, RED, WHITE, YELLOW, HudState, draw_crosshair, draw_hud, draw_text
 from settings import DEFAULT_CONFIG_PATH, ConfigError, Settings, load_settings, save_calibration
 from turret import Turret, open_link
 
@@ -42,6 +46,12 @@ NUDGE_DEG = 4.0  # servo move used for each measurement
 SETTLE_S = 0.8  # time for the servo, the mount and the camera to settle
 MIN_SHIFT_PX = 8.0  # smaller image shifts are too imprecise
 MIN_RESPONSE = 0.08  # weaker phase correlation peaks are not trusted
+
+
+# holdover table
+DISTANCE_STEP_M = 0.25
+MIN_DISTANCE_M = 0.25
+HOLDOVER_HELP = "[ ] distance  wasd aim  x arm  space fire  click impact  u undo  Enter save  Esc"
 
 
 class CalibrationError(RuntimeError):
@@ -261,6 +271,136 @@ def calibrate_deg_per_px(settings: Settings, camera: Camera, config_path: Path) 
 
 
 # ---------------------------------------------------------------------------
+# Step 3: holdover table
+# ---------------------------------------------------------------------------
+
+
+def holdover_from_impact(impact_y: float, crosshair_y: float, tilt_deg_per_px: float) -> float:
+    """Extra elevation, in degrees, that moves the impact onto the crosshair.
+
+    The shot was aimed with the crosshair on the target. A dart that landed
+    below it (larger y) needs the barrel raised by that many degrees.
+    """
+    return (impact_y - crosshair_y) * tilt_deg_per_px
+
+
+def upsert_point(
+    table: list[tuple[float, float]], distance_m: float, holdover_deg: float
+) -> list[tuple[float, float]]:
+    """Adds or replaces the point at `distance_m`, keeping the table sorted."""
+    return sorted(remove_point(table, distance_m) + [(distance_m, holdover_deg)])
+
+
+def remove_point(table: list[tuple[float, float]], distance_m: float) -> list[tuple[float, float]]:
+    return [(d, h) for d, h in table if not math.isclose(d, distance_m)]
+
+
+class HoldoverSession:
+    """State of the holdover step: test distance, table and pending fire."""
+
+    def __init__(self, settings: Settings, turret: Turret) -> None:
+        self.settings = settings
+        self.turret = turret
+        self.table = list(settings.ballistics.holdover_table)
+        self.distance_m = 1.0
+        self.fire_requested = False
+
+    def record_impact(self, impact_px: tuple[float, float]) -> None:
+        crosshair_y = self.turret.aim.crosshair_px[1]
+        tilt_deg_per_px = self.settings.aim.tilt.deg_per_px
+        holdover = holdover_from_impact(impact_px[1], crosshair_y, tilt_deg_per_px)
+        self.table = upsert_point(self.table, self.distance_m, holdover)
+        logger.info("%.2f m: holdover %+.2f deg", self.distance_m, holdover)
+
+    def handle_key(self, key: int) -> None:
+        if key == ord("["):
+            self.distance_m = max(MIN_DISTANCE_M, self.distance_m - DISTANCE_STEP_M)
+        elif key == ord("]"):
+            self.distance_m += DISTANCE_STEP_M
+        elif key == ord("u"):
+            self.table = remove_point(self.table, self.distance_m)
+        elif key == ord("x"):
+            policy = self.turret.policy
+            if policy.software_armed:
+                policy.disarm()
+            else:
+                policy.arm()
+        elif key == ord(" "):
+            self.fire_requested = True
+        elif (moved := key_direction(key)) is not None:
+            direction, coarse = moved
+            aim = self.settings.aim
+            step = aim.manual_coarse_step_deg if coarse else aim.manual_step_deg
+            self.turret.aim.nudge_view(*direction, step_deg=step)
+
+    def table_lines(self) -> TextLines:
+        lines = [(f"test distance {self.distance_m:.2f} m", WHITE)]
+        for distance, holdover in self.table:
+            color = GREEN if math.isclose(distance, self.distance_m) else YELLOW
+            lines.append((f"{distance:5.2f} m  {holdover:+.2f} deg", color))
+        return lines
+
+
+def calibrate_holdover(settings: Settings, camera: Camera, config_path: Path) -> bool:
+    """Fires test shots at known distances and records where they land."""
+    detector = YoloDetector(settings.detection, settings.safety)  # protected-class veto
+    ballistics = Ballistics.from_settings(settings.ballistics, settings.aim)
+    clicks = ClickTracker()
+    cv2.setMouseCallback(WINDOW_TITLE, clicks.on_mouse)
+
+    with open_link(settings, simulate=False) as link:
+        turret = Turret.from_settings(settings, link)
+        session = HoldoverSession(settings, turret)
+        try:
+            while True:
+                frame = camera.read()
+                now_s = time.monotonic()
+                turret.service(now_s)
+                target, detections = detector.best_target(frame, turret.aim.crosshair_px)
+                inputs = turret.fire_inputs(None, detections.veto, now_s)
+                if session.fire_requested:
+                    session.fire_requested = False
+                    decision = turret.try_fire_manual(inputs, now_s)
+                else:
+                    decision = turret.policy.evaluate_manual(inputs, now_s)
+                turret.push_aim()
+
+                impact = clicks.take()
+                if impact is not None:
+                    session.record_impact(impact)
+
+                crosshair = turret.aim.crosshair_px
+                hud = HudState(
+                    mode="HOLDOVER",
+                    software_armed=turret.policy.software_armed,
+                    hardware_armed=turret.hardware_armed(now_s),
+                    link_ok=turret.link_ok(now_s),
+                    angles=turret.aim.angles,
+                    crosshair_px=crosshair,
+                    aim_point_px=crosshair,
+                    fire_allowed=decision.allowed,
+                    blockers=decision.blockers,
+                    target=target,
+                    detections=detections,
+                    distance_m=ballistics.estimate_distance_m(target.height) if target else None,
+                    footer=HOLDOVER_HELP,
+                )
+                draw_hud(frame, hud)
+                key = show(frame, session.table_lines(), origin=(frame.shape[1] - 260, 24))
+                if key == KEY_ESCAPE:
+                    return False
+                if key in KEY_ENTER:
+                    break
+                session.handle_key(key)
+        finally:
+            shutdown_safely(turret)
+
+    save_calibration(config_path, holdover_table=session.table)
+    logger.info("holdover table saved with %d points", len(session.table))
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Program
 # ---------------------------------------------------------------------------
 
@@ -268,6 +408,7 @@ Step = Callable[[Settings, Camera, Path], bool]
 STEPS: dict[str, Step] = {
     "crosshair": calibrate_crosshair,
     "degpx": calibrate_deg_per_px,
+    "holdover": calibrate_holdover,
 }
 
 
