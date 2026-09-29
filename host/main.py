@@ -224,6 +224,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         settings = load_settings(args.config)
         detector = YoloDetector(settings.detection, settings.safety)
+        detector.warm_up(settings.camera.width, settings.camera.height)
     except (ConfigError, ValueError) as exc:
         logger.error("configuration error: %s", exc)
         return 2

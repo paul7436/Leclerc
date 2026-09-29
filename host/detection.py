@@ -15,6 +15,8 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
+
 from fire_policy import PROTECTED_CLASSES
 from settings import CameraSettings, DetectionSettings, SafetySettings
 
@@ -129,6 +131,15 @@ class YoloDetector:
     @property
     def uses_guard_model(self) -> bool:
         return self._guard_model is not None
+
+    def warm_up(self, width: int, height: int) -> None:
+        """Runs one inference on a blank frame.
+
+        The first inference is several times slower than the next ones. Doing
+        it before the serial link opens keeps it from stalling the main loop
+        past the firmware link timeout.
+        """
+        self.detect(np.zeros((height, width, 3), dtype=np.uint8))
 
     def detect(self, frame: Any) -> FrameDetections:
         # One pass at the lower threshold serves both targets and vetoes.

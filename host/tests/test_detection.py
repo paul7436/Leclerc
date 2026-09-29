@@ -164,3 +164,10 @@ def test_guard_model_must_know_protected_classes():
 def test_extra_inhibit_class_must_be_detectable():
     with pytest.raises(ValueError, match="no loaded model can detect: unicorn"):
         make_detector({"target.pt": FakeModel(COCO_NAMES)}, extra_inhibit=["unicorn"])
+
+
+def test_warm_up_runs_one_inference_on_a_blank_frame():
+    target = FakeModel(COCO_NAMES)
+    detector = make_detector({"target.pt": target})
+    detector.warm_up(320, 240)
+    assert len(target.calls) == 1

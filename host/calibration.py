@@ -344,6 +344,7 @@ class HoldoverSession:
 def calibrate_holdover(settings: Settings, camera: Camera, config_path: Path) -> bool:
     """Fires test shots at known distances and records where they land."""
     detector = YoloDetector(settings.detection, settings.safety)  # protected-class veto
+    detector.warm_up(settings.camera.width, settings.camera.height)
     ballistics = Ballistics.from_settings(settings.ballistics, settings.aim)
     clicks = ClickTracker()
     cv2.setMouseCallback(WINDOW_TITLE, clicks.on_mouse)
