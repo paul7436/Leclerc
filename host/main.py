@@ -27,7 +27,7 @@ import cv2
 import serial
 
 from control import AimController, Ballistics
-from detection import Camera, CameraError, Detection, YoloDetector
+from detection import Camera, CameraError, Detection, EndOfStream, YoloDetector
 from fire_policy import FireDecision, FireInputs
 from overlay import HudState, draw_hud
 from settings import DEFAULT_CONFIG_PATH, ConfigError, Settings, load_settings
@@ -244,6 +244,8 @@ def main(argv: list[str] | None = None) -> int:
                 run(app, camera)
             finally:
                 shutdown_safely(turret)
+    except EndOfStream:
+        logger.info("end of the video file")
     except (CameraError, serial.SerialException) as exc:
         logger.error("%s", exc)
         return 1

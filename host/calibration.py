@@ -24,7 +24,7 @@ import numpy as np
 import serial
 
 from control import Ballistics
-from detection import Camera, CameraError, YoloDetector
+from detection import Camera, CameraError, EndOfStream, YoloDetector
 from main import shutdown_safely
 from overlay import GREEN, RED, WHITE, YELLOW, HudState, draw_crosshair, draw_hud, draw_text
 from settings import DEFAULT_CONFIG_PATH, ConfigError, Settings, load_settings, save_calibration
@@ -434,6 +434,9 @@ def main(argv: list[str] | None = None) -> int:
         with Camera(settings.camera, args.source) as camera:
             cv2.namedWindow(WINDOW_TITLE, cv2.WINDOW_NORMAL)
             saved = STEPS[args.step](settings, camera, args.config)
+    except EndOfStream:
+        logger.info("end of the video file, nothing saved")
+        return 0
     except (CameraError, ConfigError, ValueError, serial.SerialException) as exc:
         logger.error("%s", exc)
         return 1

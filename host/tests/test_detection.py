@@ -171,3 +171,24 @@ def test_warm_up_runs_one_inference_on_a_blank_frame():
     detector = make_detector({"target.pt": target})
     detector.warm_up(320, 240)
     assert len(target.calls) == 1
+
+
+def test_camera_reports_end_of_a_video_file(tmp_path):
+    cv2 = pytest.importorskip("cv2")
+    np = pytest.importorskip("numpy")
+    from detection import Camera, EndOfStream
+    from settings import CameraSettings
+
+    path = tmp_path / "clip.avi"
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), 10, (64, 48))
+    if not writer.isOpened():
+        pytest.skip("no MJPG encoder in this OpenCV build")
+    for _ in range(3):
+        writer.write(np.zeros((48, 64, 3), dtype=np.uint8))
+    writer.release()
+
+    with Camera(CameraSettings(), source=str(path)) as camera:
+        for _ in range(3):
+            assert camera.read().shape == (48, 64, 3)
+        with pytest.raises(EndOfStream):
+            camera.read()

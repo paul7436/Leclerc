@@ -192,6 +192,10 @@ class CameraError(RuntimeError):
     """The camera could not be opened or stopped delivering frames."""
 
 
+class EndOfStream(CameraError):
+    """A video file source has no more frames."""
+
+
 class Camera:
     """OpenCV capture from a webcam index or a video file."""
 
@@ -202,6 +206,7 @@ class Camera:
             source = settings.source
         if isinstance(source, str) and source.isdigit():
             source = int(source)
+        self._is_file = isinstance(source, str)
         self._capture = cv2.VideoCapture(source)
         if not self._capture.isOpened():
             raise CameraError(f"cannot open camera source {source!r}")
@@ -214,7 +219,9 @@ class Camera:
     def read(self) -> Any:
         ok, frame = self._capture.read()
         if not ok:
-            raise CameraError("the camera returned no frame (disconnected or end of video)")
+            if self._is_file:
+                raise EndOfStream("end of the video file")
+            raise CameraError("the camera returned no frame (disconnected?)")
         return frame
 
     def release(self) -> None:
