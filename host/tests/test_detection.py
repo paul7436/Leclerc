@@ -192,3 +192,24 @@ def test_camera_reports_end_of_a_video_file(tmp_path):
             assert camera.read().shape == (48, 64, 3)
         with pytest.raises(EndOfStream):
             camera.read()
+
+
+def test_camera_warns_once_when_frame_size_differs(tmp_path, caplog):
+    cv2 = pytest.importorskip("cv2")
+    np = pytest.importorskip("numpy")
+    from detection import Camera
+    from settings import CameraSettings
+
+    path = tmp_path / "clip.avi"
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), 10, (64, 48))
+    if not writer.isOpened():
+        pytest.skip("no MJPG encoder in this OpenCV build")
+    for _ in range(2):
+        writer.write(np.zeros((48, 64, 3), dtype=np.uint8))
+    writer.release()
+
+    with Camera(CameraSettings(width=1280, height=720), source=str(path)) as camera:
+        camera.read()
+        camera.read()
+    warnings = [r for r in caplog.records if "config.yaml expects 1280x720" in r.getMessage()]
+    assert len(warnings) == 1

@@ -10,6 +10,7 @@ and veto logic can be unit tested without either of them installed.
 
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
@@ -19,6 +20,8 @@ import numpy as np
 
 from fire_policy import PROTECTED_CLASSES
 from settings import CameraSettings, DetectionSettings, SafetySettings
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -207,6 +210,8 @@ class Camera:
         if isinstance(source, str) and source.isdigit():
             source = int(source)
         self._is_file = isinstance(source, str)
+        self._expected_size = (settings.width, settings.height)
+        self._size_checked = False
         self._capture = cv2.VideoCapture(source)
         if not self._capture.isOpened():
             raise CameraError(f"cannot open camera source {source!r}")
@@ -222,7 +227,21 @@ class Camera:
             if self._is_file:
                 raise EndOfStream("end of the video file")
             raise CameraError("the camera returned no frame (disconnected?)")
+        if not self._size_checked:
+            self._size_checked = True
+            self._warn_on_size_mismatch(frame)
         return frame
+
+    def _warn_on_size_mismatch(self, frame: Any) -> None:
+        height, width = frame.shape[:2]
+        if (width, height) != self._expected_size:
+            logger.warning(
+                "frames are %dx%d but config.yaml expects %dx%d; the crosshair and "
+                "deg/pixel calibration only hold for the configured size",
+                width,
+                height,
+                *self._expected_size,
+            )
 
     def release(self) -> None:
         self._capture.release()
