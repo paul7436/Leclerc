@@ -1,0 +1,13 @@
+# Ultralytics dataset description. Copy to datasets/turret_targets/dataset.yaml
+# and adapt the class names. Paths are relative to `path`.
+
+path: datasets/turret_targets   # dataset root, relative to where train.py runs
+train: images/train
+val: images/val
+
+# Inert targets only. People and pets are protected classes and are never
+# targets, whatever this file says.
+names:
+  0: balloon
+  1: cardboard_target
+  2: robot
