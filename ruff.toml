@@ -1,0 +1,7 @@
+# Lint and format settings shared by every Python folder (host/, training/).
+line-length = 100
+target-version = "py310"
+src = ["host", "training"]  # first-party modules for import sorting
+
+[lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM"]
