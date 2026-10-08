@@ -124,14 +124,19 @@ For each camera frame the host:
 |   |-- config.yaml          every tunable: PID gains, thresholds, calibration
 |   |-- main.py              MANUAL and AUTO modes
 |   |-- calibration.py       crosshair, deg/pixel, holdover table
-|   |-- detection.py         camera capture and YOLO target selection
-|   |-- control.py           PID, aim controller, holdover table
-|   |-- fire_policy.py       software fire policy
+|   |-- detection.py         camera capture, YOLO, target selection, veto
+|   |-- control.py           PID, aim controller, holdover ballistics
+|   |-- fire_policy.py       software fire policy and protected classes
 |   |-- serial_link.py       serial protocol client and firmware simulator
 |   |-- turret.py            the single place where a shot is requested
+|   |-- settings.py          config.yaml loading, validation and saving
+|   |-- overlay.py           heads-up display
+|   |-- requirements.txt     runtime dependencies
+|   |-- requirements-dev.txt test and lint dependencies
 |   `-- tests/               pytest unit tests
 |-- training/                YOLO dataset layout and training example
-`-- docs/                    wiring notes, bill of materials, protocol spec
+|-- docs/                    wiring notes, bill of materials, protocol spec
+`-- .github/workflows/       CI: lint, host tests, firmware tests and build
 ```
 
 ## Hardware and wiring
@@ -216,6 +221,17 @@ The first run downloads the pretrained YOLO weights named in
 `detection.model_path`. To use your own detector, point `model_path` at your
 trained `best.pt` and list its class names in `detection.target_classes`.
 
+With `--simulate`, a software model of the firmware replaces the ESP32: same
+replies, limits, watchdog and cooldown. Its arming switch is always off, so it
+shows tracking and the fire policy at work but refuses every shot, exactly as
+the real firmware does with the switch off.
+
+**Frame rate and the link watchdog.** The status poll that keeps the firmware
+link alive runs in the vision loop on purpose: if the host stalls, the
+firmware stops accepting shots after 500 ms. Keep each frame well under that
+(a few tens of milliseconds on a laptop). On a Raspberry Pi, use
+`detection.image_size: 320` or a smaller model if the frame rate drops.
+
 ### Modes and controls
 
 The host starts in **MANUAL** mode and **software-disarmed**.
@@ -256,7 +272,8 @@ python calibration.py crosshair
 ```
 
 The crosshair is the pixel the barrel actually points at, not the image
-center. Bore-sight the blaster: look along the barrel (or use a bore laser) at
+center. It is only valid at the camera resolution set in `config.yaml`; the
+host warns when the frames have another size. Bore-sight the blaster: look along the barrel (or use a bore laser) at
 a small, distant, high-contrast mark, then click that mark in the window. Fine
 tune with `w` `a` `s` `d`, press `Enter` to save or `Esc` to cancel.
 
@@ -266,8 +283,9 @@ tune with `w` `a` `s` `d`, press `Enter` to save or `Esc` to cancel.
 python calibration.py degpx
 ```
 
-Point the turret at a textured, static scene (a bookshelf works well). For
-each axis the tool grabs a frame, nudges the servo by a few degrees in both
+Aim the turret with `w` `a` `s` `d` at a textured, static scene (a bookshelf
+works well) and press `Enter` once the link is up. For each axis the tool grabs
+a frame, nudges the servo by a few degrees in both
 directions, grabs a frame each time, and measures the image shift with phase
 correlation. It stores `deg_per_px` and the sign (`direction`) that maps a
 pixel error to the servo rotation correcting it. A shift that is too small or
@@ -285,7 +303,9 @@ distance. Place a target at a known distance, set that distance with `[` and
 plus the hardware switch) and fire a test shot with `space`. Click where the
 dart hit. The vertical offset between the crosshair and the impact is
 converted into degrees and stored for that distance. Repeat at a few
-distances, then press `Enter` to save. `u` removes the last point.
+distances, then press `Enter` to save. `u` removes the point recorded at the
+current distance. Every test shot goes through the same fire policy and
+firmware checks as in `main.py`, including the protected-class veto.
 
 During tracking, the host estimates the target distance from its bounding box
 height (`ballistics.target_height_m`) and the camera focal length derived from
@@ -338,9 +358,14 @@ cd firmware && pio test -e native
 
 # Host logic (PID, aim controller, fire policy, protocol, config, simulator)
 cd host && pip install -r requirements-dev.txt && pytest
+
+# Lint and formatting, from the repository root
+ruff check . && ruff format --check .
 ```
 
-The unit tests run without a camera, a GPU, YOLO weights or an ESP32.
+The unit tests run without a camera, a GPU, YOLO weights or an ESP32; tests
+that need OpenCV are skipped when it is not installed. GitHub Actions runs all
+of the above, plus the ESP32-S3 firmware build, on every push.
 
 ## License
 
